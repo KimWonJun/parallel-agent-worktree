@@ -1,0 +1,629 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WT_ROOT="${WT_ROOT:-$HOME/.wt}"
+CONFIG_FILE="$WT_ROOT/config"
+
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+fi
+
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+GITHUB_HOST="${GITHUB_HOST:-github.com}"
+GIT_PROTOCOL="${GIT_PROTOCOL:-ssh}"
+DEFAULT_AGENT="${DEFAULT_AGENT:-codex}"
+DEFAULT_GITHUB_OWNER="${DEFAULT_GITHUB_OWNER:-}"
+
+print_help() {
+    cat <<'EOF'
+wt - Worktree automation CLI (macOS + GitHub)
+
+Usage:
+  wt init [owner/repo|owner]
+  wt repo [owner] [--init]
+  wt branch [repo|owner/repo] [new-branch] [base-branch]
+  wt status [repo]
+  wt prune [repo]
+  wt agent [codex|gemini|claude|shell]
+  wt list
+  wt auth-check
+  wt help
+
+Notes:
+  - Agent order starts with codex by design.
+  - Phase 3 branch/status/prune workflow is available.
+EOF
+}
+
+check_deps() {
+    local deps=("$@")
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            echo "Error: '$dep' is required."
+            exit 1
+        fi
+    done
+}
+
+ensure_workspace() {
+    mkdir -p "$WORKSPACE_DIR"
+}
+
+repo_name_from_input() {
+    local input="$1"
+    if [[ "$input" == */* ]]; then
+        echo "${input##*/}"
+        return 0
+    fi
+    echo "$input"
+}
+
+repo_dir_for_name() {
+    local repo_name="$1"
+    echo "$WORKSPACE_DIR/$repo_name"
+}
+
+worktree_root_for_name() {
+    local repo_name="$1"
+    echo "$WORKSPACE_DIR/${repo_name}-worktree"
+}
+
+bare_dir_for_name() {
+    local repo_name="$1"
+    echo "$WORKSPACE_DIR/$repo_name/.bare"
+}
+
+require_initialized_repo() {
+    local repo_name="$1"
+    local bare_dir
+    bare_dir="$(bare_dir_for_name "$repo_name")"
+    if [ ! -d "$bare_dir" ]; then
+        echo "Error: Repository '$repo_name' is not initialized."
+        echo "Run: wt init <owner/repo>"
+        exit 1
+    fi
+}
+
+list_initialized_repo_names() {
+    ensure_workspace
+    local found=1
+    local repo_dir
+    for repo_dir in "$WORKSPACE_DIR"/*; do
+        if [ -d "$repo_dir/.bare" ]; then
+            found=0
+            basename "$repo_dir"
+        fi
+    done
+    return "$found"
+}
+
+pick_initialized_repo() {
+    local selected
+    selected="$(list_initialized_repo_names | fzf --prompt="Repo> " --height=30% --layout=reverse || true)"
+    if [ -z "$selected" ]; then
+        echo "No repository selected."
+        exit 0
+    fi
+    echo "$selected"
+}
+
+require_gh_auth() {
+    if gh auth status -h "$GITHUB_HOST" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "GitHub auth is not configured for host: $GITHUB_HOST"
+    echo "Run: gh auth login -h $GITHUB_HOST"
+    exit 1
+}
+
+default_owner() {
+    if [ -n "$DEFAULT_GITHUB_OWNER" ]; then
+        echo "$DEFAULT_GITHUB_OWNER"
+        return 0
+    fi
+
+    local owner
+    owner="$(gh api user --jq '.login' 2>/dev/null || true)"
+    if [ -n "$owner" ]; then
+        echo "$owner"
+        return 0
+    fi
+
+    echo "Error: Could not detect default GitHub owner." >&2
+    echo "Set DEFAULT_GITHUB_OWNER in $CONFIG_FILE or pass owner explicitly." >&2
+    exit 1
+}
+
+cmd_auth_check() {
+    if gh auth status -h "$GITHUB_HOST" >/dev/null 2>&1; then
+        echo "GitHub auth is ready for host: $GITHUB_HOST"
+        return 0
+    fi
+
+    echo "GitHub auth is not configured for host: $GITHUB_HOST"
+    echo "Run: gh auth login -h $GITHUB_HOST"
+    return 1
+}
+
+fetch_repo_metadata() {
+    local repo_full="$1"
+    local repo_json
+
+    repo_json="$(gh repo view "$repo_full" --json nameWithOwner,sshUrl,url,isPrivate 2>/dev/null || true)"
+    if [ -z "$repo_json" ] || [ "$repo_json" = "null" ]; then
+        echo "Error: Repository not found or access denied: $repo_full"
+        exit 1
+    fi
+
+    REPO_NAME_WITH_OWNER="$(echo "$repo_json" | jq -r '.nameWithOwner')"
+    REPO_NAME="$(echo "$repo_json" | jq -r '.nameWithOwner | split("/") | .[1]')"
+    REPO_SSH_URL="$(echo "$repo_json" | jq -r '.sshUrl')"
+    REPO_HTTP_URL="$(echo "$repo_json" | jq -r '.url')"
+    REPO_VISIBILITY="$(echo "$repo_json" | jq -r 'if .isPrivate then "private" else "public" end')"
+}
+
+select_repo_from_owner() {
+    local owner="$1"
+    local repos_json project_file display_file selected_line selected_repo repo_row
+
+    repos_json="$(gh repo list "$owner" --limit 200 --json nameWithOwner,sshUrl,url,isPrivate 2>/dev/null || true)"
+    if [ -z "$repos_json" ] || [ "$repos_json" = "[]" ]; then
+        echo "Error: No repositories found for owner '$owner' or access denied."
+        exit 1
+    fi
+
+    project_file="$(mktemp)"
+    display_file="$(mktemp)"
+
+    echo "$repos_json" | jq -r '.[] | "\(.nameWithOwner)\t\(.sshUrl)\t\(.url)\t\(.isPrivate)"' > "$project_file"
+
+    while IFS=$'\t' read -r name_with_owner _ssh _https is_private; do
+        local repo_name state vis
+        repo_name="${name_with_owner##*/}"
+        vis="public"
+        if [ "$is_private" = "true" ]; then
+            vis="private"
+        fi
+
+        if [ -d "$WORKSPACE_DIR/$repo_name/.bare" ]; then
+            state="[Initialized]"
+        else
+            state="[New]"
+        fi
+
+        echo "$state $name_with_owner ($vis)" >> "$display_file"
+    done < "$project_file"
+
+    selected_line="$(fzf --prompt="Repo> " --height=40% --layout=reverse < "$display_file" || true)"
+    rm -f "$display_file"
+    if [ -z "$selected_line" ]; then
+        rm -f "$project_file"
+        echo "No repository selected."
+        exit 0
+    fi
+
+    selected_repo="$(echo "$selected_line" | awk '{print $2}')"
+    repo_row="$(awk -F'\t' -v repo="$selected_repo" '$1 == repo { print; exit }' "$project_file")"
+    rm -f "$project_file"
+
+    if [ -z "$repo_row" ]; then
+        echo "Error: Failed to resolve repository metadata for selection."
+        exit 1
+    fi
+
+    REPO_NAME_WITH_OWNER="$(echo "$repo_row" | awk -F'\t' '{print $1}')"
+    REPO_NAME="${REPO_NAME_WITH_OWNER##*/}"
+    REPO_SSH_URL="$(echo "$repo_row" | awk -F'\t' '{print $2}')"
+    REPO_HTTP_URL="$(echo "$repo_row" | awk -F'\t' '{print $3}')"
+    if [ "$(echo "$repo_row" | awk -F'\t' '{print $4}')" = "true" ]; then
+        REPO_VISIBILITY="private"
+    else
+        REPO_VISIBILITY="public"
+    fi
+}
+
+repo_clone_url() {
+    if [ "$GIT_PROTOCOL" = "ssh" ]; then
+        echo "$REPO_SSH_URL"
+        return 0
+    fi
+    echo "$REPO_HTTP_URL"
+}
+
+init_repo() {
+    local repo_dir bare_dir worktree_root clone_url
+    repo_dir="$WORKSPACE_DIR/$REPO_NAME"
+    bare_dir="$repo_dir/.bare"
+    worktree_root="$WORKSPACE_DIR/${REPO_NAME}-worktree"
+
+    if [ -d "$bare_dir" ]; then
+        echo "Already initialized: $REPO_NAME_WITH_OWNER"
+        echo " - Bare repo: $bare_dir"
+        echo " - Worktree root: $worktree_root"
+        return 0
+    fi
+
+    if [ -d "$repo_dir/.git" ]; then
+        echo "Error: Standard repo exists at $repo_dir"
+        echo "Phase 3 will add conversion support. For now, move/rename this directory first."
+        exit 1
+    fi
+
+    if [ -e "$repo_dir" ] && [ ! -d "$repo_dir" ]; then
+        echo "Error: Path exists and is not a directory: $repo_dir"
+        exit 1
+    fi
+
+    clone_url="$(repo_clone_url)"
+    mkdir -p "$repo_dir"
+    git clone --bare "$clone_url" "$bare_dir"
+    git -C "$bare_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+    mkdir -p "$worktree_root"
+
+    echo "Initialized repository:"
+    echo " - Repo: $REPO_NAME_WITH_OWNER ($REPO_VISIBILITY)"
+    echo " - Bare repo: $bare_dir"
+    echo " - Worktree root: $worktree_root"
+}
+
+choose_base_branch() {
+    local bare_dir="$1"
+    local selected
+    selected="$(git -C "$bare_dir" branch -r | sed 's/^[[:space:]]*//' | grep '^origin/' | grep -v 'origin/HEAD' | sed 's#^origin/##' | sort -u | fzf --prompt="Base> " --height=30% --layout=reverse || true)"
+    if [ -z "$selected" ]; then
+        echo "No base branch selected."
+        exit 1
+    fi
+    echo "$selected"
+}
+
+safe_worktree_dir_name() {
+    local branch_name="$1"
+    echo "$branch_name" | sed 's#/#__#g'
+}
+
+resolve_branch_worktree_path() {
+    local repo_name="$1"
+    local branch_name="$2"
+    local root path suffix
+    root="$(worktree_root_for_name "$repo_name")"
+    mkdir -p "$root"
+    path="$root/$(safe_worktree_dir_name "$branch_name")"
+    if [ ! -e "$path" ]; then
+        echo "$path"
+        return 0
+    fi
+    suffix="$(date +%s)"
+    echo "${path}_${suffix}"
+}
+
+cmd_branch() {
+    check_deps git
+    ensure_workspace
+
+    local repo_arg="${1:-}"
+    local new_branch="${2:-}"
+    local base_branch="${3:-}"
+    local repo_name bare_dir target_path
+    local need_fzf=0
+
+    if [ -z "$repo_arg" ] || [ -z "$base_branch" ]; then
+        need_fzf=1
+    fi
+    if [ "$need_fzf" -eq 1 ]; then
+        check_deps fzf
+    fi
+
+    if [ -z "$repo_arg" ]; then
+        repo_name="$(pick_initialized_repo)"
+    else
+        repo_name="$(repo_name_from_input "$repo_arg")"
+    fi
+
+    require_initialized_repo "$repo_name"
+    bare_dir="$(bare_dir_for_name "$repo_name")"
+
+    git -C "$bare_dir" fetch --all --prune >/dev/null 2>&1 || true
+
+    if [ -z "$base_branch" ]; then
+        base_branch="$(choose_base_branch "$bare_dir")"
+    fi
+
+    if [ -z "$new_branch" ]; then
+        read -r -p "New branch name (default: $base_branch): " new_branch
+        if [ -z "$new_branch" ]; then
+            new_branch="$base_branch"
+        fi
+    fi
+
+    target_path="$(resolve_branch_worktree_path "$repo_name" "$new_branch")"
+
+    if git -C "$bare_dir" show-ref --verify --quiet "refs/heads/$new_branch"; then
+        if ! git -C "$bare_dir" worktree add "$target_path" "$new_branch" 2>/dev/null; then
+            echo "Branch '$new_branch' may already be checked out in another worktree."
+            read -r -p "Force attach with -f? (y/N) " answer
+            if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+                git -C "$bare_dir" worktree add -f "$target_path" "$new_branch"
+            else
+                echo "Aborted."
+                exit 1
+            fi
+        fi
+    else
+        git -C "$bare_dir" worktree add "$target_path" -b "$new_branch" "origin/$base_branch"
+    fi
+
+    echo "Worktree ready:"
+    echo " - Repo: $repo_name"
+    echo " - Base: $base_branch"
+    echo " - Branch: $new_branch"
+    echo " - Path: $target_path"
+}
+
+print_repo_status() {
+    local repo_name="$1"
+    local bare_dir
+    bare_dir="$(bare_dir_for_name "$repo_name")"
+
+    echo "- $repo_name"
+    git -C "$bare_dir" worktree list --porcelain | awk '
+        $1=="worktree"{path=$2}
+        $1=="branch"{branch=$2}
+        $1=="HEAD"{head=$2}
+        $1=="locked"{locked=$0}
+        $1=="prunable"{prunable=$0}
+        $0==""{
+            line_branch=branch
+            if (line_branch == "") { line_branch="(detached)" }
+            print "  - " line_branch " (" path ")"
+            if (locked != "") print "    " locked
+            if (prunable != "") print "    " prunable
+            path=branch=head=locked=prunable=""
+        }
+    '
+}
+
+cmd_status() {
+    check_deps git
+    ensure_workspace
+
+    local repo_arg="${1:-}"
+    local repo_name found=0
+
+    if [ -n "$repo_arg" ]; then
+        repo_name="$(repo_name_from_input "$repo_arg")"
+        require_initialized_repo "$repo_name"
+        print_repo_status "$repo_name"
+        return 0
+    fi
+
+    echo "Worktree status in $WORKSPACE_DIR:"
+    for repo_dir in "$WORKSPACE_DIR"/*; do
+        if [ -d "$repo_dir/.bare" ]; then
+            found=1
+            print_repo_status "$(basename "$repo_dir")"
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "  (none)"
+    fi
+}
+
+cmd_prune() {
+    check_deps git
+    ensure_workspace
+
+    local repo_arg="${1:-}"
+    local repo_name bare_dir found=0
+
+    if [ -n "$repo_arg" ]; then
+        repo_name="$(repo_name_from_input "$repo_arg")"
+        require_initialized_repo "$repo_name"
+        bare_dir="$(bare_dir_for_name "$repo_name")"
+        echo "Pruning worktrees for $repo_name..."
+        git -C "$bare_dir" worktree prune -v
+        return 0
+    fi
+
+    for repo_dir in "$WORKSPACE_DIR"/*; do
+        if [ -d "$repo_dir/.bare" ]; then
+            found=1
+            repo_name="$(basename "$repo_dir")"
+            bare_dir="$repo_dir/.bare"
+            echo "Pruning worktrees for $repo_name..."
+            git -C "$bare_dir" worktree prune -v
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "No initialized repositories found."
+    fi
+}
+
+cmd_repo() {
+    check_deps gh jq fzf
+    require_gh_auth
+    ensure_workspace
+
+    local owner init_after_select
+    owner="${1:-}"
+    init_after_select="${2:-}"
+
+    if [ -z "$owner" ] || [ "$owner" = "--init" ]; then
+        owner="$(default_owner)"
+        if [ "${1:-}" = "--init" ]; then
+            init_after_select="--init"
+        fi
+    fi
+
+    select_repo_from_owner "$owner"
+    echo "$REPO_NAME_WITH_OWNER"
+
+    if [ "$init_after_select" = "--init" ]; then
+        check_deps git
+        init_repo
+    fi
+}
+
+cmd_init() {
+    check_deps git gh jq
+    require_gh_auth
+    ensure_workspace
+
+    local target="${1:-}"
+
+    if [ -z "$target" ]; then
+        local owner
+        owner="$(default_owner)"
+        check_deps fzf
+        select_repo_from_owner "$owner"
+        init_repo
+        return 0
+    fi
+
+    if [[ "$target" == */* ]]; then
+        fetch_repo_metadata "$target"
+        init_repo
+        return 0
+    fi
+
+    check_deps fzf
+    select_repo_from_owner "$target"
+    init_repo
+}
+
+select_agent() {
+    local agents=("codex" "gemini" "claude" "shell")
+    printf "%s\n" "${agents[@]}" | fzf \
+        --prompt="Agent> " \
+        --height=10 \
+        --layout=reverse \
+        --header="Choose agent (codex first)"
+}
+
+launch_agent() {
+    local agent="$1"
+    case "$agent" in
+        codex)
+            if command -v codex >/dev/null 2>&1; then
+                exec codex
+            fi
+            echo "Error: 'codex' command not found."
+            echo "Install: npm install -g @openai/codex"
+            exit 1
+            ;;
+        gemini)
+            if command -v gemini >/dev/null 2>&1; then
+                exec gemini
+            fi
+            echo "Error: 'gemini' command not found."
+            echo "Install: npm install -g @google/gemini-cli"
+            exit 1
+            ;;
+        claude)
+            if command -v claude >/dev/null 2>&1; then
+                exec claude
+            fi
+            echo "Error: 'claude' command not found."
+            echo "Install: npm install -g @anthropic-ai/claude-code"
+            exit 1
+            ;;
+        shell)
+            exec "${SHELL:-/bin/zsh}"
+            ;;
+        *)
+            echo "Error: unknown agent '$agent'"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_agent() {
+    check_deps fzf
+    local selected="${1:-}"
+
+    if [ -z "$selected" ]; then
+        selected="$(select_agent || true)"
+    fi
+
+    if [ -z "$selected" ]; then
+        echo "No agent selected."
+        exit 0
+    fi
+
+    launch_agent "$selected"
+}
+
+cmd_list() {
+    ensure_workspace
+    echo "Initialized repositories in $WORKSPACE_DIR:"
+
+    local found=0
+    for repo_dir in "$WORKSPACE_DIR"/*; do
+        if [ -d "$repo_dir/.bare" ]; then
+            found=1
+            local repo_name worktree_root
+            repo_name="$(basename "$repo_dir")"
+            worktree_root="$WORKSPACE_DIR/${repo_name}-worktree"
+            echo "- $repo_name"
+            echo "  bare: $repo_dir/.bare"
+            echo "  worktree root: $worktree_root"
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "  (none)"
+    fi
+}
+
+main() {
+    local command="${1:-}"
+    case "$command" in
+        "" )
+            print_help
+            exit 0
+            ;;
+        init)
+            shift
+            cmd_init "${1:-}"
+            ;;
+        repo)
+            shift
+            cmd_repo "${1:-}" "${2:-}"
+            ;;
+        agent)
+            shift
+            cmd_agent "${1:-}"
+            ;;
+        list)
+            cmd_list
+            ;;
+        auth-check)
+            cmd_auth_check
+            ;;
+        branch)
+            shift
+            cmd_branch "${1:-}" "${2:-}" "${3:-}"
+            ;;
+        status)
+            shift
+            cmd_status "${1:-}"
+            ;;
+        prune)
+            shift
+            cmd_prune "${1:-}"
+            ;;
+        help|--help|-h)
+            print_help
+            ;;
+        *)
+            echo "Unknown command: $command"
+            print_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
