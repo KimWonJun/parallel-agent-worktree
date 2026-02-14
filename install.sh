@@ -5,19 +5,32 @@ APP_NAME="wt"
 INSTALL_ROOT="$HOME/.wt"
 BIN_DIR="$INSTALL_ROOT/bin"
 TARGET_BIN="$BIN_DIR/$APP_NAME"
+TEMPLATE_DIR="$INSTALL_ROOT/templates"
 CONFIG_FILE="$INSTALL_ROOT/config"
 SHELL_RC="$HOME/.zshrc"
 WT_INSTALL_REPO="${WT_INSTALL_REPO:-}"
 WT_INSTALL_BRANCH="${WT_INSTALL_BRANCH:-main}"
 WT_REMOTE_WT_URL="${WT_REMOTE_WT_URL:-}"
+WT_REMOTE_REPO_TOML_URL="${WT_REMOTE_REPO_TOML_URL:-}"
+WT_REMOTE_MCP_GUIDE_URL="${WT_REMOTE_MCP_GUIDE_URL:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_BIN="$SCRIPT_DIR/bin/wt"
+SOURCE_REPO_TOML="$SCRIPT_DIR/repo.toml"
+SOURCE_MCP_GUIDE="$SCRIPT_DIR/mcp-usage-guidelines.md"
 TEMP_SOURCE_BIN=""
+TEMP_SOURCE_REPO_TOML=""
+TEMP_SOURCE_MCP_GUIDE=""
 
 cleanup() {
     if [ -n "$TEMP_SOURCE_BIN" ] && [ -f "$TEMP_SOURCE_BIN" ]; then
         rm -f "$TEMP_SOURCE_BIN"
+    fi
+    if [ -n "$TEMP_SOURCE_REPO_TOML" ] && [ -f "$TEMP_SOURCE_REPO_TOML" ]; then
+        rm -f "$TEMP_SOURCE_REPO_TOML"
+    fi
+    if [ -n "$TEMP_SOURCE_MCP_GUIDE" ] && [ -f "$TEMP_SOURCE_MCP_GUIDE" ]; then
+        rm -f "$TEMP_SOURCE_MCP_GUIDE"
     fi
 }
 trap cleanup EXIT
@@ -83,6 +96,40 @@ EOF
     curl -fsSL "$remote_url" -o "$TEMP_SOURCE_BIN"
     chmod +x "$TEMP_SOURCE_BIN"
     echo "$TEMP_SOURCE_BIN"
+}
+
+resolve_template_file() {
+    local local_path="$1"
+    local explicit_url="$2"
+    local fallback_relpath="$3"
+    local temp_var_name="$4"
+    local out
+
+    if [ -f "$local_path" ]; then
+        echo "$local_path"
+        return 0
+    fi
+
+    local remote_url
+    remote_url="$explicit_url"
+    if [ -z "$remote_url" ] && [ -n "$WT_INSTALL_REPO" ]; then
+        remote_url="https://raw.githubusercontent.com/$WT_INSTALL_REPO/$WT_INSTALL_BRANCH/$fallback_relpath"
+    fi
+
+    if [ -z "$remote_url" ]; then
+        echo ""
+        return 0
+    fi
+
+    out="$(mktemp)"
+    if curl -fsSL "$remote_url" -o "$out"; then
+        eval "$temp_var_name=\"$out\""
+        echo "$out"
+        return 0
+    fi
+
+    rm -f "$out"
+    echo ""
 }
 
 ensure_config_key() {
@@ -221,10 +268,25 @@ main() {
 
     local cli_source
     cli_source="$(resolve_source_bin)"
+    local repo_toml_source
+    repo_toml_source="$(resolve_template_file "$SOURCE_REPO_TOML" "$WT_REMOTE_REPO_TOML_URL" "repo.toml" "TEMP_SOURCE_REPO_TOML")"
+    local mcp_guide_source
+    mcp_guide_source="$(resolve_template_file "$SOURCE_MCP_GUIDE" "$WT_REMOTE_MCP_GUIDE_URL" "mcp-usage-guidelines.md" "TEMP_SOURCE_MCP_GUIDE")"
 
     mkdir -p "$BIN_DIR"
     cp "$cli_source" "$TARGET_BIN"
     chmod +x "$TARGET_BIN"
+    mkdir -p "$TEMPLATE_DIR"
+    if [ -n "$repo_toml_source" ] && [ -f "$repo_toml_source" ]; then
+        cp "$repo_toml_source" "$TEMPLATE_DIR/repo.toml"
+    else
+        echo "Warning: repo.toml template not found. Initial context will be partial."
+    fi
+    if [ -n "$mcp_guide_source" ] && [ -f "$mcp_guide_source" ]; then
+        cp "$mcp_guide_source" "$TEMPLATE_DIR/mcp-usage-guidelines.md"
+    else
+        echo "Warning: mcp-usage-guidelines.md template not found. Initial context will be partial."
+    fi
 
     mkdir -p "$INSTALL_ROOT"
     touch "$CONFIG_FILE"
@@ -244,6 +306,7 @@ main() {
 Install complete.
 - Binary: $TARGET_BIN
 - Config: $CONFIG_FILE
+- Templates: $TEMPLATE_DIR
 
 Next step:
 1) source $SHELL_RC

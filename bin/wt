@@ -15,6 +15,7 @@ GIT_PROTOCOL="${GIT_PROTOCOL:-ssh}"
 DEFAULT_AGENT="${DEFAULT_AGENT:-codex}"
 DEFAULT_GITHUB_OWNER="${DEFAULT_GITHUB_OWNER:-}"
 REPOSITORY_LIST="${REPOSITORY_LIST:-}"
+WT_TEMPLATE_DIR="${WT_TEMPLATE_DIR:-$WT_ROOT/templates}"
 LAST_WORKTREE_PATH=""
 
 print_help() {
@@ -34,7 +35,7 @@ Usage:
 
 Notes:
   - Agent order starts with codex by design.
-  - `wt init` now continues to branch creation and agent launch.
+  - `wt init` continues to branch creation and agent launch.
   - Worktrees are created under: <workspace>/<repo>/<branch>
 HELP
 }
@@ -61,11 +62,6 @@ repo_name_from_input() {
         return 0
     fi
     echo "$input"
-}
-
-repo_dir_for_name() {
-    local repo_name="$1"
-    echo "$WORKSPACE_DIR/$repo_name"
 }
 
 bare_dir_for_name() {
@@ -142,17 +138,13 @@ configured_repo_candidates() {
     fi
 
     local parsed
-    parsed="$(
-        echo "$REPOSITORY_LIST" \
-        | tr ',;' '\n' \
-        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-        | awk 'NF && $0 ~ /.+\/.+/ && !seen[$0]++'
-    )"
+    parsed="$({
+        echo "$REPOSITORY_LIST" | tr ',;' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    } | awk 'NF && $0 ~ /.+\/.+/ && !seen[$0]++')"
 
     if [ -z "$parsed" ]; then
         return 1
     fi
-
     echo "$parsed"
 }
 
@@ -229,6 +221,7 @@ select_repo_from_project_file() {
 
     selected_line="$(fzf --prompt="Repo> " --height=40% --layout=reverse < "$display_file" || true)"
     rm -f "$display_file"
+
     if [ -z "$selected_line" ]; then
         echo "No repository selected."
         exit 0
@@ -333,7 +326,7 @@ choose_base_branch() {
     selected="$({
         git -C "$bare_dir" for-each-ref --format='%(refname:short)' refs/heads
         git -C "$bare_dir" for-each-ref --format='%(refname:short)' refs/remotes/origin | sed '/^origin\/HEAD$/d;s#^origin/##'
-    } | awk 'NF && !seen[$0]++' | sort -u | fzf --prompt="Base> " --height=30% --layout=reverse)" || true
+    } | awk 'NF && !seen[$0]++' | sort -u | grep -v '^origin$' | fzf --prompt="Base> " --height=30% --layout=reverse)" || true
 
     if [ -z "$selected" ]; then
         echo "No base branch selected."
@@ -345,6 +338,9 @@ choose_base_branch() {
 resolve_base_ref() {
     local bare_dir="$1"
     local base_branch="$2"
+    if [ "$base_branch" = "origin" ]; then
+        return 1
+    fi
     if git -C "$bare_dir" show-ref --verify --quiet "refs/heads/$base_branch"; then
         echo "$base_branch"
         return 0
@@ -359,17 +355,115 @@ resolve_base_ref() {
 resolve_branch_worktree_path() {
     local repo_name="$1"
     local branch_name="$2"
-    local root path suffix
+    local root path suffix dir_name
     root="$(worktree_root_for_name "$repo_name")"
     mkdir -p "$root"
-    path="$root/$branch_name"
-    mkdir -p "$(dirname "$path")"
+
+    # Convert unsafe path characters to '-', then normalize dashes.
+    # Keep only alnum, dot, underscore, dash.
+    dir_name="$(echo "$branch_name" \
+        | sed 's/[^[:alnum:]._-]/-/g' \
+        | sed 's/-\\{2,\\}/-/g' \
+        | sed 's/^-*//;s/-*$//')"
+    if [ -z "$dir_name" ]; then
+        dir_name="branch"
+    fi
+
+    path="$root/$dir_name"
     if [ ! -e "$path" ]; then
         echo "$path"
         return 0
     fi
     suffix="$(date +%s)"
     echo "${path}_${suffix}"
+}
+
+seed_worktree_file() {
+    local worktree_path="$1"
+    local file_name="$2"
+    local src="$WT_TEMPLATE_DIR/$file_name"
+    local dst="$worktree_path/$file_name"
+    if [ -f "$src" ] && [ ! -f "$dst" ]; then
+        cp "$src" "$dst"
+    fi
+}
+
+set_repo_toml_project_name() {
+    local repo_toml="$1"
+    local repo_name="$2"
+    local tmp_file
+
+    if [ ! -f "$repo_toml" ] || [ -z "$repo_name" ]; then
+        return 0
+    fi
+
+    tmp_file="$(mktemp)"
+    awk -v repo="$repo_name" '
+        BEGIN { name_replaced = 0 }
+        {
+            gsub(/__REPO_NAME__/, repo)
+            if (!name_replaced && $0 ~ /^name[[:space:]]*=/) {
+                print "name = \"" repo "\""
+                name_replaced = 1
+                next
+            }
+            print
+        }
+    ' "$repo_toml" > "$tmp_file"
+    mv "$tmp_file" "$repo_toml"
+}
+
+infer_repo_name_from_worktree() {
+    local worktree_path="$1"
+    local wt_abs ws_abs rel
+
+    if [ ! -d "$worktree_path" ]; then
+        return 1
+    fi
+
+    wt_abs="$(cd "$worktree_path" && pwd -P)"
+    ws_abs="$(cd "$WORKSPACE_DIR" && pwd -P 2>/dev/null || true)"
+
+    if [ -z "$ws_abs" ]; then
+        return 1
+    fi
+
+    case "$wt_abs" in
+        "$ws_abs"/*)
+            rel="${wt_abs#$ws_abs/}"
+            echo "${rel%%/*}"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+prepare_worktree_context() {
+    local worktree_path="$1"
+    local repo_name="${2:-}"
+
+    mkdir -p "$worktree_path"
+    seed_worktree_file "$worktree_path" "repo.toml"
+    seed_worktree_file "$worktree_path" "mcp-usage-guidelines.md"
+
+    if [ -z "$repo_name" ]; then
+        repo_name="$(infer_repo_name_from_worktree "$worktree_path" || true)"
+    fi
+
+    set_repo_toml_project_name "$worktree_path/repo.toml" "$repo_name"
+}
+
+build_initial_prompt() {
+    local worktree_path="$1"
+
+    cat <<PROMPT
+Project bootstrap context:
+1) Read ./repo.toml for repository-specific defaults.
+2) Read ./mcp-usage-guidelines.md and follow those MCP usage rules.
+3) Then continue work in this branch worktree: $worktree_path
+PROMPT
 }
 
 cmd_branch() {
@@ -431,6 +525,7 @@ cmd_branch() {
         git -C "$bare_dir" worktree add "$target_path" -b "$new_branch" "$base_ref"
     fi
 
+    prepare_worktree_context "$target_path" "$repo_name"
     LAST_WORKTREE_PATH="$target_path"
 
     echo "Worktree ready:"
@@ -560,9 +655,14 @@ cmd_repo() {
 
 launch_agent() {
     local agent="$1"
+    local initial_prompt="${2:-}"
+
     case "$agent" in
         codex)
             if command -v codex >/dev/null 2>&1; then
+                if [ -n "$initial_prompt" ]; then
+                    exec codex "$initial_prompt"
+                fi
                 exec codex
             fi
             echo "Error: 'codex' command not found."
@@ -571,6 +671,9 @@ launch_agent() {
             ;;
         gemini)
             if command -v gemini >/dev/null 2>&1; then
+                if [ -n "$initial_prompt" ]; then
+                    exec gemini "$initial_prompt"
+                fi
                 exec gemini
             fi
             echo "Error: 'gemini' command not found."
@@ -579,6 +682,9 @@ launch_agent() {
             ;;
         claude)
             if command -v claude >/dev/null 2>&1; then
+                if [ -n "$initial_prompt" ]; then
+                    exec claude "$initial_prompt"
+                fi
                 exec claude
             fi
             echo "Error: 'claude' command not found."
@@ -607,6 +713,8 @@ select_agent() {
 launch_agent_in_worktree() {
     local wt_path="$1"
     local selected="${2:-}"
+    local repo_name="${3:-}"
+    local initial_prompt
 
     if [ ! -d "$wt_path" ]; then
         echo "Error: worktree path not found: $wt_path"
@@ -614,6 +722,7 @@ launch_agent_in_worktree() {
     fi
 
     cd "$wt_path"
+    prepare_worktree_context "$wt_path" "$repo_name"
     echo "Switched to worktree: $wt_path"
 
     if [ -z "$selected" ]; then
@@ -626,7 +735,8 @@ launch_agent_in_worktree() {
         exit 0
     fi
 
-    launch_agent "$selected"
+    initial_prompt="$(build_initial_prompt "$wt_path")"
+    launch_agent "$selected" "$initial_prompt"
 }
 
 cmd_init() {
@@ -653,18 +763,18 @@ cmd_init() {
     fi
 
     init_repo
-
-    # Requested workflow: init -> branch -> agent launch in that worktree
     cmd_branch "$REPO_NAME"
-    launch_agent_in_worktree "$LAST_WORKTREE_PATH"
+    launch_agent_in_worktree "$LAST_WORKTREE_PATH" "" "$REPO_NAME"
 }
 
 cmd_agent() {
     local selected="${1:-}"
     local wt_path="${2:-}"
+    local repo_name=""
 
     if [ -n "$wt_path" ]; then
-        launch_agent_in_worktree "$wt_path" "$selected"
+        repo_name="$(infer_repo_name_from_worktree "$wt_path" || true)"
+        launch_agent_in_worktree "$wt_path" "$selected" "$repo_name"
         return 0
     fi
 
@@ -690,12 +800,11 @@ cmd_list() {
     for repo_dir in "$WORKSPACE_DIR"/*; do
         if [ -d "$repo_dir/.bare" ]; then
             found=1
-            local repo_name worktree_root
+            local repo_name
             repo_name="$(basename "$repo_dir")"
-            worktree_root="$WORKSPACE_DIR/$repo_name"
             echo "- $repo_name"
             echo "  bare: $repo_dir/.bare"
-            echo "  worktree root: $worktree_root"
+            echo "  worktree root: $WORKSPACE_DIR/$repo_name"
         fi
     done
 

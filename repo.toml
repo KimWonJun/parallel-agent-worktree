@@ -1,0 +1,13 @@
+[project]
+name = "__REPO_NAME__"
+language = "bash"
+
+[agent]
+default = "codex"
+fallback = ["gemini", "claude", "shell"]
+
+[startup]
+instructions = [
+  "Read ./mcp-usage-guidelines.md and follow MCP usage rules.",
+  "Work inside the current worktree branch directory."
+]
