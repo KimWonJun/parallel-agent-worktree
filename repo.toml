@@ -9,5 +9,6 @@ fallback = ["gemini", "claude", "shell"]
 [startup]
 instructions = [
   "Read ./mcp-usage-guidelines.md and follow MCP usage rules.",
+  "각 프로젝트의 AGENTS.md 파일을 찾아서 읽고 답변 및 실행에 적용하라.",
   "Work inside the current worktree branch directory."
 ]

@@ -326,7 +326,7 @@ choose_base_branch() {
     selected="$({
         git -C "$bare_dir" for-each-ref --format='%(refname:short)' refs/heads
         git -C "$bare_dir" for-each-ref --format='%(refname:short)' refs/remotes/origin | sed '/^origin\/HEAD$/d;s#^origin/##'
-    } | awk 'NF && !seen[$0]++' | sort -u | grep -v '^origin$' | fzf --prompt="Base> " --height=30% --layout=reverse)" || true
+    } | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF && $0 != "origin" && !seen[$0]++' | sort -u | fzf --prompt="Base> " --height=30% --layout=reverse)" || true
 
     if [ -z "$selected" ]; then
         echo "No base branch selected."

@@ -13,6 +13,7 @@ WT_INSTALL_BRANCH="${WT_INSTALL_BRANCH:-main}"
 WT_REMOTE_WT_URL="${WT_REMOTE_WT_URL:-}"
 WT_REMOTE_REPO_TOML_URL="${WT_REMOTE_REPO_TOML_URL:-}"
 WT_REMOTE_MCP_GUIDE_URL="${WT_REMOTE_MCP_GUIDE_URL:-}"
+DEFAULT_INSTALL_REPO="KimWonJun/parallel-agent-worktree"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_BIN="$SCRIPT_DIR/bin/wt"
@@ -77,6 +78,9 @@ resolve_source_bin() {
 
     local remote_url
     remote_url="$WT_REMOTE_WT_URL"
+    if [ -z "$WT_INSTALL_REPO" ]; then
+        WT_INSTALL_REPO="$DEFAULT_INSTALL_REPO"
+    fi
     if [ -z "$remote_url" ] && [ -n "$WT_INSTALL_REPO" ]; then
         remote_url="https://raw.githubusercontent.com/$WT_INSTALL_REPO/$WT_INSTALL_BRANCH/bin/wt"
     fi
@@ -112,6 +116,9 @@ resolve_template_file() {
 
     local remote_url
     remote_url="$explicit_url"
+    if [ -z "$WT_INSTALL_REPO" ]; then
+        WT_INSTALL_REPO="$DEFAULT_INSTALL_REPO"
+    fi
     if [ -z "$remote_url" ] && [ -n "$WT_INSTALL_REPO" ]; then
         remote_url="https://raw.githubusercontent.com/$WT_INSTALL_REPO/$WT_INSTALL_BRANCH/$fallback_relpath"
     fi
