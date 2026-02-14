@@ -94,6 +94,32 @@ ensure_config_key() {
     echo "${key}=\"${value}\"" >> "$CONFIG_FILE"
 }
 
+upsert_config_key() {
+    local key="$1"
+    local value="$2"
+    local temp_file
+    temp_file="$(mktemp)"
+
+    awk -v key="$key" -v value="$value" '
+        BEGIN { updated = 0 }
+        $0 ~ "^" key "=" {
+            if (updated == 0) {
+                print key "=\"" value "\""
+                updated = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (updated == 0) {
+                print key "=\"" value "\""
+            }
+        }
+    ' "$CONFIG_FILE" > "$temp_file"
+
+    mv "$temp_file" "$CONFIG_FILE"
+}
+
 add_path_to_zshrc() {
     local path_line='export PATH="$PATH:$HOME/.wt/bin"'
     if grep -Fq "$path_line" "$SHELL_RC" 2>/dev/null; then
@@ -118,12 +144,40 @@ check_gh_auth() {
     fi
 
     echo "GitHub auth check: not logged in for $host"
-    read -r -p "Run 'gh auth login -h $host' now? (y/N) " answer < /dev/tty
-    if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
-        gh auth login -h "$host"
-    else
-        echo "Skip login. You can run later: gh auth login -h $host"
-    fi
+    echo "Choose authentication method:"
+    echo "1) GitHub login flow (browser/device code)"
+    echo "2) Personal Access Token"
+    echo "3) Skip for now"
+    read -r -p "Select [1/2/3]: " choice < /dev/tty
+
+    case "$choice" in
+        1)
+            gh auth login -h "$host"
+            ;;
+        2)
+            local token
+            read -r -s -p "Enter GitHub token: " token < /dev/tty
+            echo ""
+            if [ -z "$token" ]; then
+                echo "No token entered. Skipping auth."
+                return 0
+            fi
+            printf '%s\n' "$token" | gh auth login -h "$host" --with-token
+
+            local current_protocol
+            current_protocol="$(grep '^GIT_PROTOCOL=' "$CONFIG_FILE" | cut -d'"' -f2)"
+            if [ "$current_protocol" = "ssh" ]; then
+                read -r -p "Token auth works best with HTTPS cloning. Switch GIT_PROTOCOL to https? (Y/n) " switch_proto < /dev/tty
+                if [[ "$switch_proto" != "n" && "$switch_proto" != "N" ]]; then
+                    upsert_config_key "GIT_PROTOCOL" "https"
+                    echo "Updated GIT_PROTOCOL to https"
+                fi
+            fi
+            ;;
+        *)
+            echo "Skip login. You can run later: gh auth login -h $host"
+            ;;
+    esac
 }
 
 ensure_default_owner() {
@@ -136,6 +190,20 @@ ensure_default_owner() {
     if [ -n "$owner" ]; then
         echo "DEFAULT_GITHUB_OWNER=\"$owner\"" >> "$CONFIG_FILE"
         echo "Set DEFAULT_GITHUB_OWNER to '$owner'"
+    fi
+}
+
+ensure_repository_list() {
+    if grep -q "^REPOSITORY_LIST=" "$CONFIG_FILE"; then
+        return 0
+    fi
+
+    echo "Optional: configure repository list used by 'wt init' selector."
+    read -r -p "Enter comma-separated owner/repo list (blank to skip): " repo_list < /dev/tty
+    repo_list="$(echo "$repo_list" | sed 's/[[:space:]]//g')"
+    if [ -n "$repo_list" ]; then
+        ensure_config_key "REPOSITORY_LIST" "$repo_list"
+        echo "Set REPOSITORY_LIST."
     fi
 }
 
@@ -169,6 +237,7 @@ main() {
     add_path_to_zshrc
     check_gh_auth
     ensure_default_owner
+    ensure_repository_list
 
     cat <<EOF
 
