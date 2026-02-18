@@ -33,6 +33,12 @@
 curl -fsSL https://raw.githubusercontent.com/KimWonJun/parallel-agent-worktree/main/install.sh | bash
 ```
 
+`develop` 같은 non-main 브랜치를 설치할 때는 설치 대상 브랜치도 함께 지정해야 합니다:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/KimWonJun/parallel-agent-worktree/develop/install.sh?$(date +%s)" | env WT_INSTALL_BRANCH=develop bash
+```
+
 설치 스크립트가 수행하는 작업:
 - 의존성 확인/설치: `curl`, `git`, `gh`, `jq`, `fzf`
 - 바이너리 설치: `~/.wt/bin/wt`

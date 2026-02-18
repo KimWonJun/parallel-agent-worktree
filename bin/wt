@@ -938,7 +938,7 @@ resolve_pr_worktree_path() {
         wt_path="$(git rev-parse --show-toplevel 2>/dev/null || true)"
     fi
     if [ -z "$wt_path" ] || [ ! -d "$wt_path" ]; then
-        echo "Error: worktree path not found. Pass it explicitly: wt pr /abs/path/to/worktree"
+        echo "Error: worktree path not found. Pass it explicitly: wt pr /abs/path/to/worktree" >&2
         exit 1
     fi
     echo "$wt_path"
