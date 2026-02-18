@@ -14,6 +14,14 @@
   - `repo.toml`
   - `mcp-usage-guidelines.md`
 
+## 문서
+
+- 문서 인덱스: `docs/README.md`
+- 운영 가이드: `docs/operations-guide.md`
+- 상태 API 스키마: `docs/api-status-schema.md`
+- Phase 5 수동 테스트: `docs/phase5-manual-test-scenarios.md`
+- Phase 6 테스트 시나리오: `docs/phase6-test-scenarios.md`
+
 ## 디렉토리 구조
 기본 `WORKSPACE_DIR=~/workspace` 기준:
 
@@ -125,6 +133,7 @@ wt prune <repo>
 ```
 
 `wt status --json`, `wt list --json`은 `source_base_branch`를 포함한 구조화된 출력을 제공합니다.
+상세 스키마: `docs/api-status-schema.md`
 
 ### 6) 에이전트 실행
 ```bash
@@ -136,12 +145,17 @@ wt agent codex /absolute/path/to/worktree
 ## Phase 5 테스트 가이드
 
 수동 검증 시나리오:
-- `/Users/kimwonjun/Desktop/03_Study/03_Side_Projects/parallel-agent-worktree/docs/phase5-manual-test-scenarios.md`
+- `docs/phase5-manual-test-scenarios.md`
 
 자동 E2E:
 ```bash
 bash scripts/phase5_e2e.sh
 ```
+
+## Phase 6 테스트 가이드
+
+신규 설치/기존 repo 전환/private repo/실패 복구 시나리오:
+- `docs/phase6-test-scenarios.md`
 
 ## 에이전트 기동 시 초기 컨텍스트
 worktree에서 agent를 시작할 때 아래 내용을 초기 프롬프트로 전달합니다.
