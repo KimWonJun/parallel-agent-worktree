@@ -7,6 +7,7 @@
 - Bare 저장소 기반 worktree 운영 (`<workspace>/<repo>/.bare`)
 - 브랜치 생성 + worktree 생성 (`wt branch`)
 - worktree 상태 조회/정리 (`wt status`, `wt prune`)
+- PR 생성 자동화 (`wt pr`): source base 고정 + PR 전 rebase gate
 - 에이전트 실행 (`wt agent`), 기본 우선순위 `codex`
 - `wt init` 실행 시: `repo 선택 -> branch 생성 -> 해당 worktree에서 agent 실행` 자동 연계
 - worktree 시작 컨텍스트 자동 주입:
@@ -92,21 +93,48 @@ wt branch <repo> <new-branch>
 wt branch <repo> <new-branch> <base-branch>
 ```
 
-base branch 선택 시 `origin` 항목은 제외됩니다.
+base branch 선택 시 `origin`과 `main`은 제외됩니다.
+`main`만 존재하면 먼저 non-main base 브랜치 생성을 유도합니다.
 
-### 4) 상태/정리
+### 4) PR 생성 (Phase 5 정책)
+
+```bash
+wt pr
+wt pr /absolute/path/to/worktree
+```
+
+동작 정책:
+- PR base는 worktree 생성 시점에 저장한 `source_base_branch`로 고정됩니다.
+- PR 전 `git fetch origin` + `git rebase origin/<source_base_branch>`를 수행합니다.
+- rebase 충돌 시 PR 생성을 중단하고 충돌 해결 가이드를 출력합니다.
+- `main` 브랜치에서는 `wt pr` 실행이 차단됩니다.
+
+### 5) 상태/정리
 ```bash
 wt status
 wt status <repo>
+wt status --json
 wt prune
 wt prune <repo>
 ```
 
-### 5) 에이전트 실행
+`wt status --json`, `wt list --json`은 `source_base_branch`를 포함한 구조화된 출력을 제공합니다.
+
+### 6) 에이전트 실행
 ```bash
 wt agent
 wt agent codex
 wt agent codex /absolute/path/to/worktree
+```
+
+## Phase 5 테스트 가이드
+
+수동 검증 시나리오:
+- `/Users/kimwonjun/Desktop/03_Study/03_Side_Projects/parallel-agent-worktree/docs/phase5-manual-test-scenarios.md`
+
+자동 E2E:
+```bash
+bash scripts/phase5_e2e.sh
 ```
 
 ## 에이전트 기동 시 초기 컨텍스트
