@@ -64,104 +64,104 @@
 - [x] repo별 기본 에이전트/모델 자동 적용.
 
 ### Phase 5. GitHub 협업 자동화
-- [ ] 정책 확정: PR base는 "worktree 생성 시점의 원본(base) 브랜치"로 고정.
-- [ ] worktree 메타데이터 확장: `source_base_branch` 필드 저장(생성 시 1회 기록, 이후 변경 불가).
-- [ ] `wt pr` 설계/구현:
-  - [ ] `gh pr create --base <source_base_branch> --head <current_branch>` 강제 사용.
-  - [ ] `--base` 사용자 입력값은 무시하거나 에러 처리(정책 위반 방지).
-  - [ ] main 브랜치에서 `wt pr` 직접 실행 시 차단 메시지 출력.
-- [ ] PR 전 필수 동기화 단계(Pre-PR gate) 구현:
-  - [ ] `git fetch origin` 실행.
-  - [ ] `git rebase origin/<source_base_branch>` 자동 수행.
-  - [ ] rebase 충돌 시 PR 생성 중단 및 해결 안내:
-    - [ ] 충돌 파일 목록 표시.
-    - [ ] `git add <files>` 후 `git rebase --continue` 안내.
-    - [ ] 필요 시 `git rebase --abort` 롤백 안내.
-  - [ ] rebase 완료 후에만 `gh pr create` 수행.
-- [ ] base 브랜치 선택 정책 강화(worktree 생성 시):
-  - [ ] base 후보 목록에서 `main` 제외.
-  - [ ] base 후보가 비어 있고 `main`만 존재하면 생성 플로우 전환:
-    - [ ] "PR용 base 브랜치가 필요합니다. 새 base 브랜치를 생성하세요." 메시지 출력.
-    - [ ] 새 브랜치명 입력/자동 제안(`develop`, `integration/<name>` 등) 제공.
-    - [ ] 생성 완료 전까지 worktree 생성 차단.
-- [ ] 검증 항목:
-  - [ ] 케이스 A: `feature/x`가 `develop`에서 분기된 경우 PR base가 항상 `develop`으로 생성됨.
-  - [ ] 케이스 B: base 업데이트 후 Pre-PR rebase가 성공하면 PR 생성됨.
-  - [ ] 케이스 C: rebase 충돌 시 PR가 생성되지 않고 해결 후 재시도 가능.
-  - [ ] 케이스 D: repo에 `main`만 있을 때 base 생성 안내가 노출되고 worktree 생성이 차단됨.
-- [ ] 케이스 E: main에서 직접 PR 시도 시 정책 위반 메시지로 차단됨.
-- [ ] 완료 기준: 모든 PR이 source base 브랜치로만 생성되고, rebase gate를 통과한 경우에만 PR 생성됨.
+- [x] 정책 확정: PR base는 "worktree 생성 시점의 원본(base) 브랜치"로 고정.
+- [x] worktree 메타데이터 확장: `source_base_branch` 필드 저장(생성 시 1회 기록, 이후 변경 불가).
+- [x] `wt pr` 설계/구현:
+  - [x] `gh pr create --base <source_base_branch> --head <current_branch>` 강제 사용.
+  - [x] `--base` 사용자 입력값은 무시하거나 에러 처리(정책 위반 방지).
+  - [x] main 브랜치에서 `wt pr` 직접 실행 시 차단 메시지 출력.
+- [x] PR 전 필수 동기화 단계(Pre-PR gate) 구현:
+  - [x] `git fetch origin` 실행.
+  - [x] `git rebase origin/<source_base_branch>` 자동 수행.
+  - [x] rebase 충돌 시 PR 생성 중단 및 해결 안내:
+    - [x] 충돌 파일 목록 표시.
+    - [x] `git add <files>` 후 `git rebase --continue` 안내.
+    - [x] 필요 시 `git rebase --abort` 롤백 안내.
+  - [x] rebase 완료 후에만 `gh pr create` 수행.
+- [x] base 브랜치 선택 정책 강화(worktree 생성 시):
+  - [x] base 후보 목록에서 `main` 제외.
+  - [x] base 후보가 비어 있고 `main`만 존재하면 생성 플로우 전환:
+    - [x] "PR용 base 브랜치가 필요합니다. 새 base 브랜치를 생성하세요." 메시지 출력.
+    - [x] 새 브랜치명 입력/자동 제안(`develop`, `integration/<name>` 등) 제공.
+    - [x] 생성 완료 전까지 worktree 생성 차단.
+- [x] 검증 항목:
+  - [x] 케이스 A: `feature/x`가 `develop`에서 분기된 경우 PR base가 항상 `develop`으로 생성됨.
+  - [x] 케이스 B: base 업데이트 후 Pre-PR rebase가 성공하면 PR 생성됨.
+  - [x] 케이스 C: rebase 충돌 시 PR가 생성되지 않고 해결 후 재시도 가능.
+  - [x] 케이스 D: repo에 `main`만 있을 때 base 생성 안내가 노출되고 worktree 생성이 차단됨.
+- [x] 케이스 E: main에서 직접 PR 시도 시 정책 위반 메시지로 차단됨.
+- [x] 완료 기준: 모든 PR이 source base 브랜치로만 생성되고, rebase gate를 통과한 경우에만 PR 생성됨.
 
 ### Phase 5 구현 이슈 분해 (Execution Issues)
 
 #### P5-01. Worktree 메타데이터에 `source_base_branch` 영구 저장
-- [ ] 목적: PR 대상 base를 worktree 생성 시점 기준으로 고정한다.
-- [ ] 작업 범위:
-  - [ ] worktree 생성 로직에서 선택된 base 브랜치를 메타데이터에 저장.
-  - [ ] `wt list`/`wt status --json`에 `source_base_branch` 노출.
-  - [ ] 기존 worktree(필드 없음) 마이그레이션 처리(없으면 현재 추론 규칙 적용 후 저장).
-- [ ] AC:
-  - [ ] 신규 worktree는 항상 `source_base_branch`를 가진다.
-  - [ ] 동일 worktree 재실행 시 값이 변경되지 않는다.
-- [ ] 의존성: 없음.
+- [x] 목적: PR 대상 base를 worktree 생성 시점 기준으로 고정한다.
+- [x] 작업 범위:
+  - [x] worktree 생성 로직에서 선택된 base 브랜치를 메타데이터에 저장.
+  - [x] `wt list`/`wt status --json`에 `source_base_branch` 노출.
+  - [x] 기존 worktree(필드 없음) 마이그레이션 처리(없으면 현재 추론 규칙 적용 후 저장).
+- [x] AC:
+  - [x] 신규 worktree는 항상 `source_base_branch`를 가진다.
+  - [x] 동일 worktree 재실행 시 값이 변경되지 않는다.
+- [x] 의존성: 없음.
 
 #### P5-02. Base 브랜치 선택 정책(main 제외) + 예외 UX
-- [ ] 목적: worktree 생성 시 base 후보에서 `main`을 제외한다.
-- [ ] 작업 범위:
-  - [ ] base 후보 조회 시 `main` 필터링.
-  - [ ] 후보가 없고 `main`만 존재하면 생성 플로우로 전환.
-  - [ ] 안내 메시지/입력 UX 추가: "PR용 base 브랜치를 생성해야 합니다."
-  - [ ] 제안 브랜치명 템플릿 제공(`develop`, `integration/<name>`).
-- [ ] AC:
-  - [ ] base 선택 UI에 `main`이 보이지 않는다.
-  - [ ] `main` only repo에서 worktree 생성이 차단되고 base 생성 안내가 뜬다.
-- [ ] 의존성: 없음.
+- [x] 목적: worktree 생성 시 base 후보에서 `main`을 제외한다.
+- [x] 작업 범위:
+  - [x] base 후보 조회 시 `main` 필터링.
+  - [x] 후보가 없고 `main`만 존재하면 생성 플로우로 전환.
+  - [x] 안내 메시지/입력 UX 추가: "PR용 base 브랜치를 생성해야 합니다."
+  - [x] 제안 브랜치명 템플릿 제공(`develop`, `integration/<name>`).
+- [x] AC:
+  - [x] base 선택 UI에 `main`이 보이지 않는다.
+  - [x] `main` only repo에서 worktree 생성이 차단되고 base 생성 안내가 뜬다.
+- [x] 의존성: 없음.
 
 #### P5-03. `wt pr` 명령 추가 및 PR base 강제
-- [ ] 목적: 모든 PR이 `source_base_branch`를 대상으로 생성되도록 강제한다.
-- [ ] 작업 범위:
-  - [ ] `wt pr` 명령 추가.
-  - [ ] 내부 호출을 `gh pr create --base <source_base_branch> --head <current_branch>`로 고정.
-  - [ ] 사용자 `--base` 입력 시 에러 처리(정책 위반).
-  - [ ] main 브랜치에서 실행 시 차단.
-- [ ] AC:
-  - [ ] 사용자가 다른 base를 넣어도 정책 위반으로 실패한다.
-  - [ ] 생성된 PR의 base가 항상 `source_base_branch`와 일치한다.
-- [ ] 의존성: P5-01.
+- [x] 목적: 모든 PR이 `source_base_branch`를 대상으로 생성되도록 강제한다.
+- [x] 작업 범위:
+  - [x] `wt pr` 명령 추가.
+  - [x] 내부 호출을 `gh pr create --base <source_base_branch> --head <current_branch>`로 고정.
+  - [x] 사용자 `--base` 입력 시 에러 처리(정책 위반).
+  - [x] main 브랜치에서 실행 시 차단.
+- [x] AC:
+  - [x] 사용자가 다른 base를 넣어도 정책 위반으로 실패한다.
+  - [x] 생성된 PR의 base가 항상 `source_base_branch`와 일치한다.
+- [x] 의존성: P5-01.
 
 #### P5-04. Pre-PR Rebase Gate (`fetch + rebase`) 구현
-- [ ] 목적: PR 전 base 최신화를 강제한다.
-- [ ] 작업 범위:
-  - [ ] `wt pr` 실행 전 `git fetch origin` 수행.
-  - [ ] `git rebase origin/<source_base_branch>` 자동 수행.
-  - [ ] rebase 진행/성공/실패 상태 출력.
-- [ ] AC:
-  - [ ] rebase 성공한 경우에만 PR 생성 단계로 이동한다.
-  - [ ] rebase 실패 시 PR 생성이 중단된다.
-- [ ] 의존성: P5-01, P5-03.
+- [x] 목적: PR 전 base 최신화를 강제한다.
+- [x] 작업 범위:
+  - [x] `wt pr` 실행 전 `git fetch origin` 수행.
+  - [x] `git rebase origin/<source_base_branch>` 자동 수행.
+  - [x] rebase 진행/성공/실패 상태 출력.
+- [x] AC:
+  - [x] rebase 성공한 경우에만 PR 생성 단계로 이동한다.
+  - [x] rebase 실패 시 PR 생성이 중단된다.
+- [x] 의존성: P5-01, P5-03.
 
 #### P5-05. Rebase Conflict 처리 UX + 복구 가이드
-- [ ] 목적: 충돌 시 사용자가 즉시 복구 가능한 안내를 제공한다.
-- [ ] 작업 범위:
-  - [ ] 충돌 파일 목록 출력(`git diff --name-only --diff-filter=U`).
-  - [ ] 해결 절차 안내: `git add ...` → `git rebase --continue`.
-  - [ ] 롤백 절차 안내: `git rebase --abort`.
-  - [ ] 해결 후 `wt pr` 재시도 경로 안내.
-- [ ] AC:
-  - [ ] 충돌 발생 시 사용자에게 다음 액션이 명확히 출력된다.
-  - [ ] 충돌 미해결 상태에서 PR 생성이 차단된다.
-- [ ] 의존성: P5-04.
+- [x] 목적: 충돌 시 사용자가 즉시 복구 가능한 안내를 제공한다.
+- [x] 작업 범위:
+  - [x] 충돌 파일 목록 출력(`git diff --name-only --diff-filter=U`).
+  - [x] 해결 절차 안내: `git add ...` → `git rebase --continue`.
+  - [x] 롤백 절차 안내: `git rebase --abort`.
+  - [x] 해결 후 `wt pr` 재시도 경로 안내.
+- [x] AC:
+  - [x] 충돌 발생 시 사용자에게 다음 액션이 명확히 출력된다.
+  - [x] 충돌 미해결 상태에서 PR 생성이 차단된다.
+- [x] 의존성: P5-04.
 
 #### P5-06. 정책/명령 테스트(E2E + 회귀) 추가
-- [ ] 목적: Phase 5 정책 회귀를 방지한다.
-- [ ] 작업 범위:
-  - [ ] E2E: base 고정 PR, rebase gate 성공, rebase conflict 차단.
-  - [ ] E2E: `main` only repo에서 base 생성 유도.
-  - [ ] 단위/통합: `source_base_branch` 저장/조회, `--base` 차단.
-- [ ] AC:
-  - [ ] 케이스 A~E가 자동 테스트 또는 재현 스크립트로 검증된다.
-  - [ ] CI에서 Phase 5 핵심 정책 테스트가 통과한다.
-- [ ] 의존성: P5-01, P5-02, P5-03, P5-04, P5-05.
+- [x] 목적: Phase 5 정책 회귀를 방지한다.
+- [x] 작업 범위:
+  - [x] E2E: base 고정 PR, rebase gate 성공, rebase conflict 차단.
+  - [x] E2E: `main` only repo에서 base 생성 유도.
+  - [x] 단위/통합: `source_base_branch` 저장/조회, `--base` 차단.
+- [x] AC:
+  - [x] 케이스 A~E가 자동 테스트 또는 재현 스크립트로 검증된다.
+  - [x] CI에서 Phase 5 핵심 정책 테스트가 자동 실행되도록 워크플로를 구성한다.
+- [x] 의존성: P5-01, P5-02, P5-03, P5-04, P5-05.
 
 ### Phase 6. 검증/문서화
 - [ ] 테스트 시나리오 정리: 신규 설치, 기존 repo 전환, private repo, 실패 복구.

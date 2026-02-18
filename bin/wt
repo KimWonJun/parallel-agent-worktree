@@ -26,10 +26,11 @@ Usage:
   wt init [owner/repo|owner]
   wt repo [owner] [--init]
   wt branch [repo|owner/repo] [new-branch] [base-branch]
-  wt status [repo]
+  wt status [repo] [--json]
   wt prune [repo]
+  wt pr [worktree-path]
   wt agent [codex|gemini|claude|shell] [worktree-path]
-  wt list
+  wt list [--json]
   wt auth-check
   wt help
 
@@ -320,14 +321,81 @@ init_repo() {
     echo " - Worktree location: $repo_dir/<branch>"
 }
 
-choose_base_branch() {
+normalize_branch_name() {
+    local branch_name="$1"
+    echo "${branch_name#origin/}"
+}
+
+list_branch_candidates() {
     local bare_dir="$1"
-    local selected
-    selected="$({
+    {
         git -C "$bare_dir" for-each-ref --format='%(refname:short)' refs/heads
         git -C "$bare_dir" for-each-ref --format='%(refname:short)' refs/remotes/origin | sed '/^origin\/HEAD$/d;s#^origin/##'
-    } | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF && $0 != "origin" && !seen[$0]++' | sort -u | fzf --prompt="Base> " --height=30% --layout=reverse)" || true
+    } | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF && $0 != "origin" && !seen[$0]++' | sort -u
+}
 
+branch_exists_in_bare() {
+    local bare_dir="$1"
+    local branch_name="$2"
+    git -C "$bare_dir" show-ref --verify --quiet "refs/heads/$branch_name" \
+        || git -C "$bare_dir" show-ref --verify --quiet "refs/remotes/origin/$branch_name"
+}
+
+create_non_main_base_branch() {
+    local bare_dir="$1"
+    local new_base=""
+    local seed_ref=""
+
+    echo "No non-main base branch is available." >&2
+    echo "Main branch is excluded from worktree base and PR target policy." >&2
+    echo "Create a PR base branch first (examples: develop, integration/core)." >&2
+    read -r -p "New base branch name: " new_base
+    new_base="$(normalize_branch_name "$new_base")"
+
+    if [ -z "$new_base" ] || [ "$new_base" = "main" ]; then
+        echo "Error: base branch name must be non-empty and cannot be 'main'." >&2
+        exit 1
+    fi
+
+    if branch_exists_in_bare "$bare_dir" "$new_base"; then
+        echo "Base branch '$new_base' already exists. Using it." >&2
+        echo "$new_base"
+        return 0
+    fi
+
+    if git -C "$bare_dir" show-ref --verify --quiet "refs/remotes/origin/main"; then
+        seed_ref="origin/main"
+    elif git -C "$bare_dir" show-ref --verify --quiet "refs/heads/main"; then
+        seed_ref="main"
+    else
+        echo "Error: Could not find seed ref for new base branch (expected main or origin/main)." >&2
+        exit 1
+    fi
+
+    git -C "$bare_dir" branch "$new_base" "$seed_ref" >/dev/null
+    git -C "$bare_dir" push origin "refs/heads/$new_base:refs/heads/$new_base" >/dev/null
+
+    echo "Created base branch '$new_base' from '$seed_ref'." >&2
+    echo "$new_base"
+}
+
+choose_base_branch() {
+    local bare_dir="$1"
+    local selected all_candidates non_main_candidates
+    all_candidates="$(list_branch_candidates "$bare_dir" || true)"
+    non_main_candidates="$(echo "$all_candidates" | awk '$0 != "main"')"
+
+    if [ -z "$non_main_candidates" ]; then
+        if echo "$all_candidates" | awk '$0 == "main" { found=1 } END { exit !found }'; then
+            selected="$(create_non_main_base_branch "$bare_dir")"
+            echo "$selected"
+            return 0
+        fi
+        echo "Error: no base branches available."
+        exit 1
+    fi
+
+    selected="$(echo "$non_main_candidates" | fzf --prompt="Base> " --height=30% --layout=reverse || true)"
     if [ -z "$selected" ]; then
         echo "No base branch selected."
         exit 1
@@ -338,7 +406,11 @@ choose_base_branch() {
 resolve_base_ref() {
     local bare_dir="$1"
     local base_branch="$2"
+    base_branch="$(normalize_branch_name "$base_branch")"
     if [ "$base_branch" = "origin" ]; then
+        return 1
+    fi
+    if [ "$base_branch" = "main" ]; then
         return 1
     fi
     if git -C "$bare_dir" show-ref --verify --quiet "refs/heads/$base_branch"; then
@@ -455,6 +527,105 @@ prepare_worktree_context() {
     set_repo_toml_project_name "$worktree_path/repo.toml" "$repo_name"
 }
 
+worktree_metadata_file() {
+    local worktree_path="$1"
+    echo "$worktree_path/.wt/metadata"
+}
+
+read_worktree_metadata_value() {
+    local worktree_path="$1"
+    local key="$2"
+    local metadata_file
+    metadata_file="$(worktree_metadata_file "$worktree_path")"
+    if [ ! -f "$metadata_file" ]; then
+        return 1
+    fi
+    awk -F'=' -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1); exit }' "$metadata_file"
+}
+
+write_worktree_metadata_value() {
+    local worktree_path="$1"
+    local key="$2"
+    local value="$3"
+    local metadata_dir metadata_file tmp_file
+    metadata_dir="$worktree_path/.wt"
+    metadata_file="$(worktree_metadata_file "$worktree_path")"
+    mkdir -p "$metadata_dir"
+
+    if [ -f "$metadata_file" ] && grep -q "^${key}=" "$metadata_file"; then
+        tmp_file="$(mktemp)"
+        awk -F'=' -v k="$key" -v v="$value" '
+            $1 == k { print k "=" v; updated=1; next }
+            { print }
+            END { if (!updated) print k "=" v }
+        ' "$metadata_file" > "$tmp_file"
+        mv "$tmp_file" "$metadata_file"
+        return 0
+    fi
+
+    printf "%s=%s\n" "$key" "$value" >> "$metadata_file"
+}
+
+set_source_base_for_branch() {
+    local worktree_path="$1"
+    local branch_name="$2"
+    local source_base="$3"
+    local existing_source_base
+    source_base="$(normalize_branch_name "$source_base")"
+
+    if [ -z "$source_base" ]; then
+        return 1
+    fi
+
+    existing_source_base="$(read_worktree_metadata_value "$worktree_path" "source_base_branch" || true)"
+    existing_source_base="$(normalize_branch_name "${existing_source_base:-}")"
+    if [ -n "$existing_source_base" ]; then
+        if [ "$existing_source_base" != "$source_base" ]; then
+            echo "Warning: source_base_branch is immutable. Keeping existing '$existing_source_base' (requested '$source_base')." >&2
+        fi
+        source_base="$existing_source_base"
+    fi
+
+    git -C "$worktree_path" config "branch.$branch_name.wt-source-base" "$source_base"
+    git -C "$worktree_path" config "branch.$branch_name.gh-merge-base" "$source_base"
+    write_worktree_metadata_value "$worktree_path" "source_base_branch" "$source_base"
+}
+
+resolve_source_base_branch() {
+    local worktree_path="$1"
+    local branch_name="$2"
+    local source_base
+
+    source_base="$(read_worktree_metadata_value "$worktree_path" "source_base_branch" || true)"
+    if [ -n "$source_base" ]; then
+        echo "$(normalize_branch_name "$source_base")"
+        return 0
+    fi
+
+    source_base="$(git -C "$worktree_path" config --get "branch.$branch_name.wt-source-base" || true)"
+    if [ -n "$source_base" ]; then
+        source_base="$(normalize_branch_name "$source_base")"
+        write_worktree_metadata_value "$worktree_path" "source_base_branch" "$source_base"
+        echo "$source_base"
+        return 0
+    fi
+
+    source_base="$(git -C "$worktree_path" config --get "branch.$branch_name.gh-merge-base" || true)"
+    if [ -n "$source_base" ]; then
+        source_base="$(normalize_branch_name "$source_base")"
+        write_worktree_metadata_value "$worktree_path" "source_base_branch" "$source_base"
+        echo "$source_base"
+        return 0
+    fi
+
+    return 1
+}
+
+current_branch_name() {
+    local worktree_path="$1"
+    git -C "$worktree_path" symbolic-ref --short HEAD 2>/dev/null || true
+}
+
 build_initial_prompt() {
     local worktree_path="$1"
 
@@ -493,6 +664,15 @@ cmd_branch() {
     if [ -z "$base_branch" ]; then
         base_branch="$(choose_base_branch "$bare_dir")"
     fi
+    base_branch="$(normalize_branch_name "$base_branch")"
+    if [ "$base_branch" = "main" ]; then
+        echo "Error: base branch 'main' is not allowed for worktree creation."
+        echo "Choose or create a non-main base branch."
+        if ! echo "$(list_branch_candidates "$bare_dir" || true)" | awk '$0 != "main" { found=1 } END { exit !found }'; then
+            create_non_main_base_branch "$bare_dir" >/dev/null
+        fi
+        exit 1
+    fi
 
     if [ -z "$new_branch" ]; then
         read -r -p "New branch name: " new_branch
@@ -526,6 +706,7 @@ cmd_branch() {
     fi
 
     prepare_worktree_context "$target_path" "$repo_name"
+    set_source_base_for_branch "$target_path" "$new_branch" "$base_branch" >/dev/null 2>&1 || true
     LAST_WORKTREE_PATH="$target_path"
 
     echo "Worktree ready:"
@@ -538,31 +719,162 @@ cmd_branch() {
 print_repo_status() {
     local repo_name="$1"
     local bare_dir
+    local path="" branch="" locked="" prunable="" is_bare="0"
     bare_dir="$(bare_dir_for_name "$repo_name")"
 
     echo "- $repo_name"
-    git -C "$bare_dir" worktree list --porcelain | awk '
-        $1=="worktree"{path=$2}
-        $1=="branch"{branch=$2}
-        $1=="locked"{locked=$0}
-        $1=="prunable"{prunable=$0}
-        $0==""{
-            line_branch=branch
-            if (line_branch == "") { line_branch="(detached)" }
-            print "  - " line_branch " (" path ")"
-            if (locked != "") print "    " locked
-            if (prunable != "") print "    " prunable
-            path=branch=locked=prunable=""
-        }
-    '
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -z "$line" ]; then
+            if [ -n "$path" ] && [ "$is_bare" != "1" ]; then
+                local line_branch short_branch source_base
+                line_branch="$branch"
+                if [ -z "$line_branch" ]; then
+                    line_branch="(detached)"
+                fi
+                short_branch="${line_branch#refs/heads/}"
+                echo "  - $line_branch ($path)"
+                if [ -d "$path" ] && [ "$short_branch" != "(detached)" ]; then
+                    source_base="$(resolve_source_base_branch "$path" "$short_branch" || true)"
+                    if [ -n "$source_base" ]; then
+                        echo "    source_base_branch: $source_base"
+                    fi
+                fi
+                if [ -n "$locked" ]; then
+                    echo "    $locked"
+                fi
+                if [ -n "$prunable" ]; then
+                    echo "    $prunable"
+                fi
+            fi
+            path=""; branch=""; locked=""; prunable=""; is_bare="0"
+            continue
+        fi
+        case "$line" in
+            worktree\ *)
+                path="${line#worktree }"
+                ;;
+            branch\ *)
+                branch="${line#branch }"
+                ;;
+            bare)
+                is_bare="1"
+                ;;
+            locked*)
+                locked="$line"
+                ;;
+            prunable*)
+                prunable="$line"
+                ;;
+        esac
+    done < <(git -C "$bare_dir" worktree list --porcelain; echo)
+}
+
+repo_status_json() {
+    local repo_name="$1"
+    local bare_dir
+    local path="" branch="" locked="" prunable="" is_bare="0"
+    local records_file
+
+    bare_dir="$(bare_dir_for_name "$repo_name")"
+    records_file="$(mktemp)"
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -z "$line" ]; then
+            if [ -n "$path" ] && [ "$is_bare" != "1" ]; then
+                local line_branch short_branch source_base
+                line_branch="$branch"
+                if [ -z "$line_branch" ]; then
+                    line_branch="(detached)"
+                fi
+                short_branch="${line_branch#refs/heads/}"
+                source_base=""
+                if [ -d "$path" ] && [ "$short_branch" != "(detached)" ]; then
+                    source_base="$(resolve_source_base_branch "$path" "$short_branch" || true)"
+                fi
+                jq -cn \
+                    --arg path "$path" \
+                    --arg branch "$short_branch" \
+                    --arg source_base_branch "$source_base" \
+                    --arg locked "$locked" \
+                    --arg prunable "$prunable" \
+                    '{
+                        path: $path,
+                        branch: $branch,
+                        source_base_branch: (if $source_base_branch == "" then null else $source_base_branch end),
+                        locked: (if $locked == "" then null else $locked end),
+                        prunable: (if $prunable == "" then null else $prunable end)
+                    }' >> "$records_file"
+            fi
+            path=""; branch=""; locked=""; prunable=""; is_bare="0"
+            continue
+        fi
+        case "$line" in
+            worktree\ *) path="${line#worktree }" ;;
+            branch\ *) branch="${line#branch }" ;;
+            bare) is_bare="1" ;;
+            locked*) locked="$line" ;;
+            prunable*) prunable="$line" ;;
+        esac
+    done < <(git -C "$bare_dir" worktree list --porcelain; echo)
+
+    jq -cn \
+        --arg repo "$repo_name" \
+        --slurpfile worktrees "$records_file" \
+        '{ repo: $repo, worktrees: $worktrees }'
+    rm -f "$records_file"
 }
 
 cmd_status() {
     check_deps git
     ensure_workspace
 
-    local repo_arg="${1:-}"
-    local repo_name found=0
+    local repo_arg=""
+    local output_json="0"
+    local arg repo_name found=0
+
+    for arg in "$@"; do
+        case "$arg" in
+            --json)
+                output_json="1"
+                ;;
+            -*)
+                echo "Error: unsupported option '$arg' for wt status."
+                exit 1
+                ;;
+            *)
+                if [ -n "$repo_arg" ]; then
+                    echo "Error: too many arguments for wt status."
+                    exit 1
+                fi
+                repo_arg="$arg"
+                ;;
+        esac
+    done
+
+    if [ "$output_json" = "1" ]; then
+        check_deps jq
+        local repo_json_file
+        repo_json_file="$(mktemp)"
+        if [ -n "$repo_arg" ]; then
+            repo_name="$(repo_name_from_input "$repo_arg")"
+            require_initialized_repo "$repo_name"
+            repo_status_json "$repo_name" > "$repo_json_file"
+        else
+            local repo_dir
+            for repo_dir in "$WORKSPACE_DIR"/*; do
+                if [ -d "$repo_dir/.bare" ]; then
+                    repo_status_json "$(basename "$repo_dir")" >> "$repo_json_file"
+                fi
+            done
+        fi
+
+        jq -cn \
+            --arg workspace "$WORKSPACE_DIR" \
+            --slurpfile repositories "$repo_json_file" \
+            '{ workspace: $workspace, repositories: $repositories }'
+        rm -f "$repo_json_file"
+        return 0
+    fi
 
     if [ -n "$repo_arg" ]; then
         repo_name="$(repo_name_from_input "$repo_arg")"
@@ -615,6 +927,141 @@ cmd_prune() {
     if [ "$found" -eq 0 ]; then
         echo "No initialized repositories found."
     fi
+}
+
+resolve_pr_worktree_path() {
+    local input_path="${1:-}"
+    local wt_path=""
+    if [ -n "$input_path" ]; then
+        wt_path="$input_path"
+    else
+        wt_path="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+    if [ -z "$wt_path" ] || [ ! -d "$wt_path" ]; then
+        echo "Error: worktree path not found. Pass it explicitly: wt pr /abs/path/to/worktree" >&2
+        exit 1
+    fi
+    echo "$wt_path"
+}
+
+ensure_clean_worktree_for_rebase() {
+    local wt_path="$1"
+    if ! git -C "$wt_path" diff --quiet || ! git -C "$wt_path" diff --cached --quiet; then
+        echo "Error: working tree has uncommitted changes."
+        echo "Commit or stash changes before running 'wt pr'."
+        exit 1
+    fi
+}
+
+print_rebase_conflict_help() {
+    local wt_path="$1"
+    local conflicted
+    conflicted="$(git -C "$wt_path" diff --name-only --diff-filter=U || true)"
+    echo "Rebase conflict detected. PR creation stopped."
+    if [ -n "$conflicted" ]; then
+        echo "Conflicted files:"
+        echo "$conflicted" | sed 's/^/ - /'
+    fi
+    echo "Resolve conflicts, then run:"
+    echo "  git -C \"$wt_path\" add <files>"
+    echo "  git -C \"$wt_path\" rebase --continue"
+    echo "If you need to rollback:"
+    echo "  git -C \"$wt_path\" rebase --abort"
+    echo "After resolving, re-run: wt pr \"$wt_path\""
+}
+
+repo_slug_from_remote_url() {
+    local remote_url="$1"
+    local host="$GITHUB_HOST"
+    remote_url="${remote_url#git@${host}:}"
+    remote_url="${remote_url#https://${host}/}"
+    remote_url="${remote_url#ssh://git@${host}/}"
+    remote_url="${remote_url%.git}"
+    echo "$remote_url"
+}
+
+cmd_pr() {
+    local input_path=""
+    local wt_path branch_name source_base_branch repo_name
+    local head_branch
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            --base|-B)
+                echo "Error: --base is not allowed. Base branch is enforced from source_base_branch metadata."
+                exit 1
+                ;;
+            --head|-H)
+                echo "Error: --head is not allowed. Head branch is always current worktree branch."
+                exit 1
+                ;;
+            -*)
+                echo "Error: unsupported option '$arg' for wt pr."
+                exit 1
+                ;;
+            *)
+                if [ -n "$input_path" ]; then
+                    echo "Error: too many arguments for wt pr."
+                    exit 1
+                fi
+                input_path="$arg"
+                ;;
+        esac
+    done
+
+    check_deps git gh
+    require_gh_auth
+
+    wt_path="$(resolve_pr_worktree_path "$input_path")"
+    branch_name="$(current_branch_name "$wt_path")"
+    if [ -z "$branch_name" ]; then
+        echo "Error: could not determine current branch (detached HEAD or invalid worktree)."
+        exit 1
+    fi
+    if [ "$branch_name" = "main" ]; then
+        echo "Error: main branch is excluded from 'wt pr'."
+        exit 1
+    fi
+
+    source_base_branch="$(resolve_source_base_branch "$wt_path" "$branch_name" || true)"
+    if [ -z "$source_base_branch" ]; then
+        echo "Error: source_base_branch metadata not found for this worktree."
+        echo "Recreate the worktree branch with 'wt branch' to register base metadata."
+        exit 1
+    fi
+    if [ "$source_base_branch" = "main" ]; then
+        echo "Error: PR target branch 'main' is blocked by policy."
+        echo "Use a non-main integration branch as source base."
+        exit 1
+    fi
+
+    repo_name="$(infer_repo_name_from_worktree "$wt_path" || true)"
+    if [ -n "$repo_name" ]; then
+        require_initialized_repo "$repo_name"
+    fi
+
+    ensure_clean_worktree_for_rebase "$wt_path"
+
+    echo "Pre-PR gate: fetch + rebase onto origin/$source_base_branch"
+    git -C "$wt_path" fetch origin --prune
+    if ! git -C "$wt_path" show-ref --verify --quiet "refs/remotes/origin/$source_base_branch"; then
+        echo "Error: origin/$source_base_branch not found."
+        exit 1
+    fi
+
+    if ! git -C "$wt_path" rebase "origin/$source_base_branch"; then
+        print_rebase_conflict_help "$wt_path"
+        exit 1
+    fi
+
+    head_branch="$branch_name"
+    echo "Creating PR with enforced base policy:"
+    echo " - base: $source_base_branch"
+    echo " - head: $head_branch"
+    git -C "$wt_path" push -u origin "$head_branch"
+    gh -R "$(repo_slug_from_remote_url "$(git -C "$wt_path" config --get remote.origin.url)")" \
+        pr create --base "$source_base_branch" --head "$head_branch"
 }
 
 cmd_repo() {
@@ -793,6 +1240,30 @@ cmd_agent() {
 
 cmd_list() {
     ensure_workspace
+
+    local output_json="0"
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --json)
+                output_json="1"
+                ;;
+            -*)
+                echo "Error: unsupported option '$arg' for wt list."
+                exit 1
+                ;;
+            *)
+                echo "Error: wt list does not accept positional arguments."
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ "$output_json" = "1" ]; then
+        cmd_status --json
+        return 0
+    fi
+
     echo "Initialized repositories in $WORKSPACE_DIR:"
 
     local found=0
@@ -801,10 +1272,20 @@ cmd_list() {
         if [ -d "$repo_dir/.bare" ]; then
             found=1
             local repo_name
+            local status_json
             repo_name="$(basename "$repo_dir")"
             echo "- $repo_name"
             echo "  bare: $repo_dir/.bare"
             echo "  worktree root: $WORKSPACE_DIR/$repo_name"
+            status_json="$(repo_status_json "$repo_name")"
+            echo "$status_json" | jq -r '
+                if (.worktrees | length) == 0 then
+                    "  worktrees: (none)"
+                else
+                    "  worktrees:" ,
+                    (.worktrees[] | "    - \(.branch) (\(.path)) source_base=\(.source_base_branch // "null")")
+                end
+            '
         fi
     done
 
@@ -834,18 +1315,23 @@ main() {
             ;;
         status)
             shift
-            cmd_status "${1:-}"
+            cmd_status "$@"
             ;;
         prune)
             shift
             cmd_prune "${1:-}"
+            ;;
+        pr)
+            shift
+            cmd_pr "$@"
             ;;
         agent)
             shift
             cmd_agent "${1:-}" "${2:-}"
             ;;
         list)
-            cmd_list
+            shift
+            cmd_list "$@"
             ;;
         auth-check)
             cmd_auth_check
