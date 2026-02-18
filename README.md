@@ -20,7 +20,7 @@
 - Bare 저장소: `~/workspace/<repo>/.bare`
 - Worktree: `~/workspace/<repo>/<branch-dir>`
 
-`branch-dir`는 브랜치명에서 경로가 나뉘는 '/' 및  안전하지 않은 문자를 `-`로 치환해 생성합니다.
+`branch-dir`는 브랜치명에서 경로가 나뉘는 '/' 및 안전하지 않은 문자를 `-`로 치환해 생성합니다.
 
 예:
 - `feat/new-api` -> `feat-new-api`
